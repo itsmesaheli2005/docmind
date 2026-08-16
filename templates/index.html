@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DocMind — Chat with Your Documents</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+</head>
+<body>
+  <div class="layout">
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <button id="newChatBtn" class="new-chat-btn">+ New Chat</button>
+
+      <input type="text" id="searchInput" class="search-input" placeholder="🔍 Search past chats..." />
+
+      <div class="conversation-list" id="conversationList"></div>
+    </aside>
+
+    <!-- MAIN CHAT PANEL -->
+    <div class="app">
+      <header>
+        <h1>📄 DocMind</h1>
+        <p>Ask questions about your uploaded documents — powered by RAG</p>
+      </header>
+
+      <div class="chat-toolbar">
+        <button type="button" id="exportBtn" class="toolbar-btn">⬇️ Export chat</button>
+      </div>
+
+      <div id="dropZone" class="drop-zone">
+        <span id="dropZoneText">📎 Drag & drop a PDF here, or click to upload</span>
+        <input type="file" id="fileInput" accept="application/pdf" hidden />
+      </div>
+
+      <div class="chat-box" id="chatBox">
+        <div class="empty-state" id="emptyState">
+          <span style="font-size:40px;display:block;margin-bottom:8px;">💬</span>
+          Ask a question about your PDF.
+        </div>
+      </div>
+
+      <form id="chatForm">
+        <input type="text" id="question" placeholder="Ask something about your documents..." autocomplete="off" required />
+        <button type="submit">Ask</button>
+      </form>
+    </div>
+
+  </div>
+
+  <script>
+    const form = document.getElementById('chatForm');
+    const input = document.getElementById('question');
+    const chatBox = document.getElementById('chatBox');
+    const dropZone = document.getElementById('dropZone');
+    const dropZoneText = document.getElementById('dropZoneText');
+    const fileInput = document.getElementById('fileInput');
+    const conversationList = document.getElementById('conversationList');
+    const newChatBtn = document.getElementById('newChatBtn');
+    const searchInput = document.getElementById('searchInput');
+    const exportBtn = document.getElementById('exportBtn');
+
+    const CONVERSATIONS_KEY = 'docmind_conversations';
+    const ACTIVE_KEY = 'docmind_active_conversation';
+
+    let conversations = {};
+    let activeId = null;
+    let searchTerm = '';
+
+    // ---------- Storage helpers ----------
+    function loadConversations() {
+      conversations = JSON.parse(localStorage.getItem(CONVERSATIONS_KEY) || '{}');
+      activeId = localStorage.getItem(ACTIVE_KEY);
+
+      const ids = Object.keys(conversations);
+      if (!activeId || !conversations[activeId]) {
+        if (ids.length > 0) {
+          activeId = ids[ids.length - 1];
+        } else {
+          activeId = createConversation();
+        }
+      }
+    }
+
+    function persistConversations() {
+      localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(conversations));
+      localStorage.setItem(ACTIVE_KEY, activeId);
+    }
+
+    function createConversation() {
+      const id = 'conv_' + Date.now();
+      conversations[id] = { id, title: 'New Chat', messages: [], createdAt: Date.now() };
+      return id;
+    }
+
+    function setActiveConversation(id) {
+      activeId = id;
+      persistConversations();
+      renderChatBox();
+      renderSidebar();
+    }
+
+    function startNewChat() {
+      const id = createConversation();
+      activeId = id;
+      persistConversations();
+      renderChatBox();
+      renderSidebar();
+      input.focus();
+    }
+
+    function deleteConversation(id, e) {
+      e.stopPropagation();
+      if (!confirm('Delete this conversation?')) return;
+
+      delete conversations[id];
+
+      if (activeId === id) {
+        const ids = Object.keys(conversations);
+        activeId = ids.length > 0 ? ids[ids.length - 1] : createConversation();
+      }
+      persistConversations();
+      renderChatBox();
+      renderSidebar();
+    }
+
+    // ---------- Sidebar rendering (with search filter) ----------
+    function renderSidebar() {
+      conversationList.innerHTML = '';
+      let ids = Object.keys(conversations).sort((a, b) => conversations[b].createdAt - conversations[a].createdAt);
+
+      if (searchTerm.trim() !== '') {
+        const term = searchTerm.toLowerCase();
+        ids = ids.filter(id => {
+          const conv = conversations[id];
+          const titleMatch = conv.title.toLowerCase().includes(term);
+          const messageMatch = conv.messages.some(m => m.text.toLowerCase().includes(term));
+          return titleMatch || messageMatch;
+        });
+      }
+
+      if (ids.length === 0) {
+        conversationList.innerHTML = `<div class="no-results">No matching chats</div>`;
+        return;
+      }
+
+      ids.forEach(id => {
+        const conv = conversations[id];
+        const item = document.createElement('div');
+        item.className = 'conv-item' + (id === activeId ? ' active' : '');
+        item.innerHTML = `
+          <span class="conv-title">${escapeHtml(conv.title)}</span>
+          <button class="conv-delete" title="Delete">✕</button>
+        `;
+        item.addEventListener('click', () => setActiveConversation(id));
+        item.querySelector('.conv-delete').addEventListener('click', (e) => deleteConversation(id, e));
+        conversationList.appendChild(item);
+      });
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    // ---------- Chat box rendering ----------
+    function renderChatBox() {
+      chatBox.innerHTML = '';
+      const conv = conversations[activeId];
+
+      if (!conv || conv.messages.length === 0) {
+        chatBox.innerHTML = `
+          <div class="empty-state" id="emptyState">
+            <span style="font-size:40px;display:block;margin-bottom:8px;">💬</span>
+            Ask a question about your PDF.
+          </div>`;
+        return;
+      }
+
+      conv.messages.forEach(item => {
+        renderMessage(item.text, item.sender, item.sources || [], false, item.timestamp);
+      });
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function removeEmptyState() {
+      const empty = document.getElementById('emptyState');
+      if (empty) empty.remove();
+    }
+
+    function saveMessage(text, sender, sources = []) {
+      const conv = conversations[activeId];
+      const timestamp = Date.now();
+      conv.messages.push({ text, sender, sources, timestamp });
+
+      if (conv.title === 'New Chat' && sender === 'user') {
+        conv.title = text.length > 40 ? text.slice(0, 40) + '...' : text;
+      }
+
+      persistConversations();
+      renderSidebar();
+      return timestamp;
+    }
+
+    function formatTime(ts) {
+      const d = new Date(ts);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function renderMessage(text, sender, sources = [], animate = false, timestamp = null) {
+      removeEmptyState();
+
+      const msg = document.createElement('div');
+      msg.className = `msg ${sender} fade-in`;
+
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      msg.appendChild(bubble);
+
+      if (sources && sources.length > 0) {
+        const srcDiv = document.createElement('div');
+        srcDiv.className = 'sources';
+        const pageNumbers = sources.map(s => `Page ${s.page || '?'}`).join(', ');
+        srcDiv.innerHTML = `<strong>📚 Sources:</strong> ${pageNumbers}`;
+        msg.appendChild(srcDiv);
+      }
+
+      if (timestamp) {
+        const timeDiv = document.createElement('div');
+        timeDiv.className = 'msg-time';
+        timeDiv.textContent = formatTime(timestamp);
+        msg.appendChild(timeDiv);
+      }
+
+      chatBox.appendChild(msg);
+      chatBox.scrollTop = chatBox.scrollHeight;
+
+      if (animate && sender === 'bot') {
+        typeText(bubble, text);
+      } else {
+        bubble.innerHTML = window.marked ? marked.parse(text) : text;
+      }
+    }
+
+    function addMessage(text, sender, sources = [], animate = false) {
+      const timestamp = Date.now();
+      renderMessage(text, sender, sources, animate, timestamp);
+      saveMessage(text, sender, sources);
+    }
+
+    function typeText(el, fullText) {
+      let i = 0;
+      const speed = 12;
+      el.innerHTML = '';
+
+      function step() {
+        i += 3;
+        const chunk = fullText.slice(0, i);
+        el.innerHTML = window.marked ? marked.parse(chunk) : chunk;
+        chatBox.scrollTop = chatBox.scrollHeight;
+        if (i < fullText.length) {
+          setTimeout(step, speed);
+        }
+      }
+      step();
+    }
+
+    // ---------- Chat form ----------
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const question = input.value.trim();
+      if (!question) return;
+
+      addMessage(question, 'user');
+      input.value = '';
+      input.disabled = true;
+
+      const loadingMsg = document.createElement('div');
+      loadingMsg.className = 'msg bot fade-in';
+      loadingMsg.innerHTML = '<div class="bubble typing-dots"><span></span><span></span><span></span></div>';
+      chatBox.appendChild(loadingMsg);
+      chatBox.scrollTop = chatBox.scrollHeight;
+
+      try {
+        const res = await fetch('/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question })
+        });
+        const data = await res.json();
+        loadingMsg.remove();
+
+        if (data.error) {
+          addMessage('⚠️ Error: ' + data.error, 'bot');
+        } else {
+          addMessage(data.answer, 'bot', data.sources || [], true);
+        }
+      } catch (err) {
+        loadingMsg.remove();
+        addMessage('❌ Something went wrong. Is the server running?', 'bot');
+      } finally {
+        input.disabled = false;
+        input.focus();
+      }
+    });
+
+    // ---------- Search ----------
+    searchInput.addEventListener('input', (e) => {
+      searchTerm = e.target.value;
+      renderSidebar();
+    });
+
+    // ---------- Export chat ----------
+    exportBtn.addEventListener('click', () => {
+      const conv = conversations[activeId];
+      if (!conv || conv.messages.length === 0) {
+        alert('This conversation is empty — nothing to export.');
+        return;
+      }
+
+      let content = `DocMind Chat Export\n`;
+      content += `Conversation: ${conv.title}\n`;
+      content += `Exported: ${new Date().toLocaleString()}\n`;
+      content += `${'='.repeat(50)}\n\n`;
+
+      conv.messages.forEach(m => {
+        const who = m.sender === 'user' ? 'You' : 'DocMind';
+        const time = formatTime(m.timestamp);
+        content += `[${time}] ${who}:\n${m.text}\n`;
+        if (m.sources && m.sources.length > 0) {
+          const pages = m.sources.map(s => `Page ${s.page || '?'}`).join(', ');
+          content += `Sources: ${pages}\n`;
+        }
+        content += `\n`;
+      });
+
+      const blob = new Blob([content], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${conv.title.replace(/[^a-z0-9]/gi, '_').slice(0, 40)}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+
+    // ---------- Drag & drop / click upload ----------
+    dropZone.addEventListener('click', () => fileInput.click());
+
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('drag-over');
+    });
+
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.classList.remove('drag-over');
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      if (e.dataTransfer.files.length > 0) {
+        uploadFile(e.dataTransfer.files[0]);
+      }
+    });
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length > 0) {
+        uploadFile(fileInput.files[0]);
+      }
+    });
+
+    async function uploadFile(file) {
+      if (!file.name.toLowerCase().endsWith('.pdf')) {
+        dropZoneText.textContent = '❌ Only PDF files are supported. Try again.';
+        return;
+      }
+
+      dropZoneText.textContent = `⏳ Uploading and indexing "${file.name}"...`;
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const res = await fetch('/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (data.error) {
+          dropZoneText.textContent = `⚠️ ${data.error}`;
+        } else {
+          dropZoneText.textContent = `✅ ${data.message}`;
+        }
+      } catch (err) {
+        dropZoneText.textContent = '❌ Upload failed. Is the server running?';
+      }
+    }
+
+    // ---------- Init ----------
+    newChatBtn.addEventListener('click', startNewChat);
+    loadConversations();
+    renderSidebar();
+    renderChatBox();
+  </script>
+</body>
+</html>
