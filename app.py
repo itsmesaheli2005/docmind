@@ -205,6 +205,7 @@ def upload():
         return jsonify({"error": str(e)}), 500
 
 # ---------- Start the App ----------
+load_or_index()
+
 if __name__ == "__main__":
-    load_or_index()
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=False, host="0.0.0.0", port=5000)
